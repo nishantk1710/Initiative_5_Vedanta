@@ -39,3 +39,19 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# runtime data (uploaded PDFs, per-document pipeline output)
+/uploads/*
+!/uploads/.gitkeep
+/results/*
+!/results/.gitkeep
+
+# stray local test artifacts
+/python/_test_*.py
+_test_*.png

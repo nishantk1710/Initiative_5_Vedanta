@@ -1,69 +1,234 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import SampleSOWs from "@/components/SampleSOWs";
+import SOWUploader from "@/components/SOWUploader";
+import Stepper from "@/components/Stepper";
+import ProcessingStatus, { type ProcessingPhase } from "@/components/ProcessingStatus";
+import type { PageRegionsEntry, PageRoute, SelectedSource, UploadResponse } from "@/lib/types";
+
+function formatBytes(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(1)} MB`;
+}
 
 export default function Home() {
+  const router = useRouter();
+  const [selected, setSelected] = useState<SelectedSource | null>(null);
+  const [sampleSize, setSampleSize] = useState<number | null>(null);
+  const [documentId, setDocumentId] = useState<string | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [view, setView] = useState<"home" | "processing">("home");
+  const [phase, setPhase] = useState<ProcessingPhase>("preparing");
+  const [pages, setPages] = useState<PageRoute[] | null>(null);
+  const [pageRegions, setPageRegions] = useState<PageRegionsEntry | null>(null);
+
+  const busyRef = useRef(false);
+
+  useEffect(() => {
+    setDocumentId(null);
+    setError(null);
+    setSampleSize(null);
+
+    if (selected?.type === "sample") {
+      fetch(selected.file, { method: "HEAD" })
+        .then((res) => {
+          const len = res.headers.get("content-length");
+          if (len) setSampleSize(Number(len));
+        })
+        .catch(() => {
+          // size unavailable, fall back to "sample document" label
+        });
+    }
+  }, [selected]);
+
+  const fileName =
+    selected?.type === "sample"
+      ? selected.file.split("/").pop() ?? "sample.pdf"
+      : selected?.type === "upload"
+        ? selected.file.name
+        : null;
+
+  const fileSizeLabel =
+    selected?.type === "upload"
+      ? formatBytes(selected.file.size)
+      : selected?.type === "sample"
+        ? sampleSize !== null
+          ? formatBytes(sampleSize)
+          : "sample document"
+        : null;
+
+  async function handleProcess() {
+    if (!selected || busyRef.current) return;
+    busyRef.current = true;
+    setIsBusy(true);
+    setError(null);
+
+    try {
+      let currentDocumentId = documentId;
+
+      if (!currentDocumentId) {
+        const formData = new FormData();
+        if (selected.type === "upload") {
+          formData.append("file", selected.file);
+        } else {
+          const res = await fetch(selected.file);
+          const blob = await res.blob();
+          const filename = selected.file.split("/").pop() ?? "sample.pdf";
+          formData.append("file", new File([blob], filename, { type: "application/pdf" }));
+        }
+
+        const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
+        if (!uploadRes.ok) {
+          const body = await uploadRes.json().catch(() => ({}));
+          throw new Error(body.error ?? `Upload failed (${uploadRes.status})`);
+        }
+        const uploadData = (await uploadRes.json()) as UploadResponse;
+        currentDocumentId = uploadData.documentId;
+        setDocumentId(uploadData.documentId);
+      }
+
+      // cheap pre-pass: real per-page routing + rendered page images,
+      // available before the heavy /api/process call even starts
+      const prepareRes = await fetch("/api/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documentId: currentDocumentId }),
+      });
+      if (!prepareRes.ok) {
+        const body = await prepareRes.json().catch(() => ({}));
+        throw new Error(body.error ?? `Preparation failed (${prepareRes.status})`);
+      }
+      const prepareData = (await prepareRes.json()) as { pages: PageRoute[] };
+      setPages(prepareData.pages);
+      setPageRegions(null);
+      setPhase("processing");
+      setView("processing");
+
+      const processRes = await fetch("/api/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documentId: currentDocumentId }),
+      });
+      if (!processRes.ok) {
+        const body = await processRes.json().catch(() => ({}));
+        throw new Error(body.error ?? `Processing failed (${processRes.status})`);
+      }
+
+      // fetch the real detected regions for page 1 now that processing wrote regions.json
+      const pagesRes = await fetch(`/api/result/${currentDocumentId}/pages`);
+      if (pagesRes.ok) {
+        const pagesData = (await pagesRes.json()) as PageRegionsEntry[];
+        setPageRegions(pagesData.find((p) => p.page === 1) ?? null);
+      }
+
+      setPhase("done");
+      setTimeout(() => router.push(`/results/${currentDocumentId}`), 700);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+      setView("home");
+    } finally {
+      busyRef.current = false;
+      setIsBusy(false);
+    }
+  }
+
+  const hasDigital = pages?.some((p) => p.type === "digital") ?? false;
+  const hasScanned = pages?.some((p) => p.type === "scanned") ?? false;
+  const digitalCount = pages?.filter((p) => p.type === "digital").length ?? 0;
+  const scannedCount = pages?.filter((p) => p.type === "scanned").length ?? 0;
+  const page1IsScanned = pages?.find((p) => p.page === 1)?.type === "scanned";
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <>
+      <div className="header">
+        <div className="wordmark">
+          <div className="mark">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 20 L9 8 L13 15 L16 6 L20 20 Z" />
+            </svg>
+          </div>
+          <h1>Mining SOW Extractor</h1>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
+        <p className="tagline">Scope-of-work → structured BOQ</p>
+        <p className="version-note">
+          Watch the document itself get read: regions light up as each engine claims them — <b>PyMuPDF</b> for
+          clean digital text, <b>PaddleOCR</b> for printed tables, <b>Tesseract</b> for handwriting.
+        </p>
+        <Stepper activeIndex={view === "home" ? 0 : 1} />
+      </div>
+
+      <div className="stage">
+        {view === "home" && (
+          <section className="card">
+            <div className="home-inner">
+              <p className="section-label">Sample documents</p>
+              <SampleSOWs
+                onSelect={setSelected}
+                selectedFile={selected?.type === "sample" ? selected.file : undefined}
+              />
+
+              <div className="divider">or</div>
+
+              <SOWUploader onSelect={setSelected} />
+
+              {selected && (
+                <div id="previewBlock">
+                  <div className="preview-row">
+                    <div className="thumb-mock" style={{ width: 52, aspectRatio: "3/4" }} />
+                    <div className="info">
+                      <span className="fname">{fileName}</span>
+                      <span className="fmeta">{fileSizeLabel} · ready to process</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="remove-btn"
+                      onClick={() => setSelected(null)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+
+                  {error && (
+                    <p style={{ color: "var(--hazard-rust)", fontSize: 12.5, marginTop: 10 }}>{error}</p>
+                  )}
+
+                  <button
+                    type="button"
+                    className="process-btn"
+                    onClick={handleProcess}
+                    disabled={isBusy}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                      <path d="M5 12h14M13 6l6 6-6 6" />
+                    </svg>
+                    {isBusy ? "Uploading…" : "Process SOW"}
+                  </button>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {view === "processing" && documentId && (
+          <section className="card">
+            <ProcessingStatus
+              fileName={fileName ?? documentId}
+              pageImageUrl={`/api/result/${documentId}/page/1`}
+              pageIsScanned={page1IsScanned}
+              hasDigital={hasDigital}
+              hasScanned={hasScanned}
+              digitalCount={digitalCount}
+              scannedCount={scannedCount}
+              phase={phase}
+              pageRegions={pageRegions}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+          </section>
+        )}
+      </div>
+    </>
   );
 }

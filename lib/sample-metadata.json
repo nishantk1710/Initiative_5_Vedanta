@@ -1,0 +1,51 @@
+{
+  "sow-1.pdf": {
+    "pages": [
+      {
+        "page": 1,
+        "type": "digital"
+      },
+      {
+        "page": 2,
+        "type": "digital"
+      },
+      {
+        "page": 3,
+        "type": "digital"
+      }
+    ],
+    "digitalCount": 3,
+    "scannedCount": 0,
+    "thumbnail": "/samples/thumbs/sow-1.png"
+  },
+  "sow-2.pdf": {
+    "pages": [
+      {
+        "page": 1,
+        "type": "digital"
+      },
+      {
+        "page": 2,
+        "type": "digital"
+      },
+      {
+        "page": 3,
+        "type": "scanned"
+      }
+    ],
+    "digitalCount": 2,
+    "scannedCount": 1,
+    "thumbnail": "/samples/thumbs/sow-2.png"
+  },
+  "sow-3.pdf": {
+    "pages": [
+      {
+        "page": 1,
+        "type": "scanned"
+      }
+    ],
+    "digitalCount": 0,
+    "scannedCount": 1,
+    "thumbnail": "/samples/thumbs/sow-3.png"
+  }
+}

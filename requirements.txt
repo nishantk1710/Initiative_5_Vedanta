@@ -1,0 +1,37 @@
+fastapi
+uvicorn
+python-multipart
+pymupdf
+pillow
+python-dotenv
+
+# Layout detection (PP-StructureV3) + text OCR (PaddleOCR), scanned path.
+# paddlepaddle is pinned to 3.1.0: 3.2+ hits a Windows-CPU oneDNN/PIR executor
+# bug (NotImplementedError: ConvertPirAttribute2RuntimeAttribute ...) inside
+# the RT-DETR-based layout detector; 3.0.0 avoids that but then fails inside
+# PaddleOCR's own text-detection model (ValueError: Type of attribute:
+# strides is not right) because its exported op defs are too old. 3.1.0 is
+# the version verified to work for both PP-StructureV3 and PaddleOCR here.
+paddlepaddle==3.1.0
+paddleocr==3.7.0
+# paddleocr's PP-StructureV3 needs this extra; version must match paddleocr's
+# resolved paddlex dependency (`pip show paddlex`).
+paddlex[ocr]==3.7.2
+
+# Handwriting OCR path.
+pytesseract
+opencv-python
+
+# Install with (Windows/venv):
+#   pip install -r requirements.txt
+# On Debian/Ubuntu system Python (externally-managed-environment), add:
+#   pip install -r requirements.txt --break-system-packages
+#
+# pytesseract is only a wrapper — it shells out to the real Tesseract binary,
+# which is a SYSTEM package, not something pip installs:
+#   Windows:        winget install --id UB-Mannheim.TesseractOCR -e
+#                   (or the installer at https://github.com/UB-Mannheim/tesseract/wiki)
+#   Debian/Ubuntu:  sudo apt install tesseract-ocr
+#   macOS:          brew install tesseract
+# If `tesseract` isn't on PATH after install, point pytesseract at it directly:
+#   pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
