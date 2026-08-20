@@ -5,17 +5,21 @@ import { useRouter } from "next/navigation";
 import Stepper from "@/components/Stepper";
 import BOQTable from "@/components/BOQTable";
 import SourceViewer from "@/components/SourceViewer";
-import type { BoqRow, PageRegionsEntry, ProcessResult } from "@/lib/types";
+import type { DocumentType, LineItem, PageRegionsEntry, ProcessResult } from "@/lib/types";
 
-type FieldName = "description" | "quantity" | "unit" | "rate" | "amount";
+type FieldName = "itemCode" | "description" | "quantity" | "unit" | "rate" | "amount" | "taxRate" | "taxAmount";
 
-function caseTag(pages: PageRegionsEntry[]): string {
-  const hasDigital = pages.some((p) => p.type === "digital");
-  const hasScanned = pages.some((p) => p.type === "scanned");
-  if (hasDigital && hasScanned) return "Mixed Scanned SOW";
-  if (hasScanned) return "Scanned SOW";
-  return "Digital PDF";
-}
+const CASE_TAG_LABEL: Record<DocumentType, string> = {
+  invoice: "Invoice",
+  boq: "Mining SOW",
+  unknown: "Unrecognized document",
+};
+
+const RESULT_TITLE: Record<DocumentType, string> = {
+  invoice: "Invoice Result",
+  boq: "Mining SOW Result",
+  unknown: "Document Result",
+};
 
 export default function ResultsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -24,7 +28,7 @@ export default function ResultsPage({ params }: { params: Promise<{ id: string }
   const [result, setResult] = useState<ProcessResult | null>(null);
   const [pages, setPages] = useState<PageRegionsEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [modal, setModal] = useState<{ row: BoqRow; field: FieldName } | null>(null);
+  const [modal, setModal] = useState<{ row: LineItem; field: FieldName } | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -52,7 +56,7 @@ export default function ResultsPage({ params }: { params: Promise<{ id: string }
               <path d="M4 20 L9 8 L13 15 L16 6 L20 20 Z" />
             </svg>
           </div>
-          <h1>Mining SOW Extractor</h1>
+          <h1>Document Extractor</h1>
         </div>
         <Stepper activeIndex={2} />
       </div>
@@ -68,7 +72,7 @@ export default function ResultsPage({ params }: { params: Promise<{ id: string }
               <>
                 <div className="res-top">
                   <div>
-                    <h2>Mining SOW Result</h2>
+                    <h2>{RESULT_TITLE[result.document_type]}</h2>
                     <span className="sub">{id}</span>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 11 }}>
@@ -76,7 +80,7 @@ export default function ResultsPage({ params }: { params: Promise<{ id: string }
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                         <path d="M20 6L9 17l-5-5" />
                       </svg>
-                      {pages ? caseTag(pages) : "…"}
+                      {CASE_TAG_LABEL[result.document_type]}
                     </span>
                     <button type="button" className="back-btn" onClick={() => router.push("/")}>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}>
@@ -95,6 +99,8 @@ export default function ResultsPage({ params }: { params: Promise<{ id: string }
                       {pages.filter((p) => p.type === "scanned").length} scanned
                     </>
                   )}
+                  {result.metadata.vendor && <> · {result.metadata.vendor}</>}
+                  {result.metadata.invoiceNumber && <> · #{result.metadata.invoiceNumber}</>}
                 </p>
 
                 <BOQTable
@@ -109,7 +115,9 @@ export default function ResultsPage({ params }: { params: Promise<{ id: string }
 
       {modal &&
         (() => {
-          const dims = pageDims.get(modal.row[modal.field].page);
+          const field = modal.row[modal.field];
+          if (!field) return null;
+          const dims = pageDims.get(field.page);
           if (!dims) return null;
           return (
             <SourceViewer

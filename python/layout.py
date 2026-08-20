@@ -3,8 +3,17 @@ import os
 import pymupdf
 
 from paths import document_dir
+from metadata_extractor import is_line_item_text
 
-RENDER_DPI = 200
+# Page render resolution: zoom 4.0 == 288 DPI. This is the ONLY place pages
+# get rendered to pixels —
+# detect_layout(), extract_printed(), extract_handwriting(), and the
+# source-viewer crop all read this same saved PNG and the width/height
+# recorded alongside it in regions.json, so every bbox already lives in this
+# resolution's pixel space. Raising/lowering this constant is safe on its
+# own; it only becomes a bug if some OTHER code path starts rendering pages
+# at a different zoom while bboxes from this one are still in use.
+RENDER_ZOOM = 4.0
 
 INSTALL_HINT = (
     'pip install paddlepaddle paddleocr --break-system-packages\n'
@@ -43,8 +52,7 @@ def render_page_to_image(file_path: str, page_number: int, document_id: str) -> 
 
     with pymupdf.open(file_path) as doc:
         page = doc[page_number - 1]
-        zoom = RENDER_DPI / 72
-        matrix = pymupdf.Matrix(zoom, zoom)
+        matrix = pymupdf.Matrix(RENDER_ZOOM, RENDER_ZOOM)
         pix = page.get_pixmap(matrix=matrix)
         pix.save(image_path)
         width, height = pix.width, pix.height
@@ -146,50 +154,40 @@ _CATEGORY_BY_LABEL = {
     "formula_number": "legal_text",
 }
 
-_BOQ_KEYWORDS = (
-    "description",
-    "qty",
-    "quantity",
-    "unit",
-    "rate",
-    "amount",
-    "item",
-    "bill of quantities",
-    "boq",
-    "total",
-)
-
-
 def classify_region_label(label: str) -> str:
     return _CATEGORY_BY_LABEL.get(label, "printed_text")
 
 
-def _is_boq_related(text: str) -> bool:
-    if not text:
-        return False
-    if any(ch.isdigit() for ch in text):
-        return True
-    lower = text.lower()
-    return any(keyword in lower for keyword in _BOQ_KEYWORDS)
-
-
 def select_regions(regions: list[dict]) -> list[dict]:
-    """Apply the keep/drop policy over detected layout regions:
-    TABLE -> keep, PRINTED TEXT -> keep only if BOQ-related (has digits or a
-    BOQ keyword), HANDWRITING -> keep, LOGO/LEGAL TEXT/UNRELATED HEADER ->
-    drop. Kept regions are tagged with a `category` field consumed by the
-    OCR/handwriting extractors."""
+    """Split detected layout regions into two disjoint roles, never both:
+
+    - role "line_item": TABLE regions (always), plus loose PRINTED TEXT that
+      looks tabular and isn't a metadata phrase, plus HANDWRITING. These are
+      the only regions line_items.py ever sees.
+    - role "metadata": HEADER/LEGAL TEXT regions, plus loose PRINTED TEXT
+      that either doesn't look tabular or IS a metadata phrase (GST no,
+      bill no, "details of receiver", totals footer, etc). These feed
+      classify_document()/extract_metadata() and are never considered for
+      line-item extraction.
+
+    Only true non-text regions (LOGO: images/charts/seals — nothing to OCR)
+    are dropped entirely.
+    """
     kept = []
     for region in regions:
         category = classify_region_label(region["type"])
 
-        if category == "table":
-            kept.append({**region, "category": "table"})
-        elif category == "printed_text":
-            if _is_boq_related(region.get("content", "")):
-                kept.append({**region, "category": "printed_text"})
+        if category == "logo":
+            continue
+        elif category == "table":
+            kept.append({**region, "category": "table", "role": "line_item"})
         elif category == "handwriting":
-            kept.append({**region, "category": "handwriting"})
-        # "logo", "legal_text", "unrelated_header" -> dropped
+            kept.append({**region, "category": "handwriting", "role": "line_item"})
+        elif category == "printed_text":
+            content = region.get("content", "")
+            role = "line_item" if is_line_item_text(content) else "metadata"
+            kept.append({**region, "category": "printed_text", "role": role})
+        elif category in ("unrelated_header", "legal_text"):
+            kept.append({**region, "category": category, "role": "metadata"})
 
     return kept

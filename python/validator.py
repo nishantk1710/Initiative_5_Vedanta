@@ -1,17 +1,40 @@
 from rules import evaluate_field, evaluate_arithmetic, combine_status
 
-FIELD_NAMES = ("description", "quantity", "unit", "rate", "amount")
+# LineItem field keys that carry an ExtractedValue (everything else on a row
+# dict is a status/marker key, not a field to validate).
+_FIELD_KEYS = ("description", "quantity", "unit", "rate", "amount", "itemCode", "taxRate", "taxAmount")
 
 
-def run_validation(boq_rows: list[dict]) -> list[dict]:
-    """Apply rules.py to every field in every row, tag each row with an
-    overall status (worst-case across its fields), and record which rule(s)
-    triggered — per field and aggregated at the row level."""
-    for row in boq_rows:
+def _row_field_names(row: dict) -> list[str]:
+    """Only the fields actually present on this row — optional columns
+    (unit/itemCode/taxRate/taxAmount) may be entirely absent, per LineItem."""
+    return [name for name in _FIELD_KEYS if name in row]
+
+
+def run_validation(line_items: list[dict]) -> list[dict]:
+    """Apply rules.py to every field present on every row, tag each row with
+    an overall status (worst-case across its fields), and record which
+    rule(s) triggered — per field and aggregated at the row level.
+
+    A row line_items.py already tagged "_status_override": "incomplete"
+    (a table-shaped region whose header couldn't be confidently mapped to
+    known columns) bypasses field-by-field evaluation entirely — there's
+    nothing meaningful to validate when we didn't attempt column
+    assignment in the first place.
+    """
+    for row in line_items:
+        if row.pop("_status_override", None) == "incomplete":
+            row["status"] = "incomplete"
+            row["rules_triggered"] = ["table_header_not_identified"]
+            for field_name in _row_field_names(row):
+                row[field_name]["status"] = "incomplete"
+                row[field_name]["rules_triggered"] = []
+            continue
+
         row_status = "valid"
         row_rules: list[str] = []
 
-        for field_name in FIELD_NAMES:
+        for field_name in _row_field_names(row):
             field = row[field_name]
             status, rules_triggered = evaluate_field(field_name, field)
             field["status"] = status
@@ -31,4 +54,4 @@ def run_validation(boq_rows: list[dict]) -> list[dict]:
         row["status"] = row_status
         row["rules_triggered"] = row_rules
 
-    return boq_rows
+    return line_items

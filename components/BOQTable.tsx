@@ -1,39 +1,80 @@
 "use client";
 
-import type { BoqField, BoqRow, ProcessResult } from "@/lib/types";
+import type { ExtractedValue, LineItem, ProcessResult } from "@/lib/types";
 
-const FIELD_ORDER: Array<keyof Pick<BoqRow, "description" | "quantity" | "unit" | "rate" | "amount">> = [
-  "description",
-  "quantity",
-  "unit",
-  "rate",
-  "amount",
-];
+const ALL_FIELD_KEYS = ["itemCode", "description", "quantity", "unit", "rate", "amount", "taxRate", "taxAmount"] as const;
+type FieldKey = (typeof ALL_FIELD_KEYS)[number];
 
-const ENGINE_LABEL: Record<BoqField["source"], string> = {
+const ENGINE_LABEL: Record<ExtractedValue["source"], string> = {
   pymupdf: "PyMuPDF",
   paddleocr: "PaddleOCR",
   tesseract: "Tesseract",
 };
 
-function rowConfidence(row: BoqRow): number {
-  return Math.min(...FIELD_ORDER.map((f) => row[f].confidence));
+// Only the fields this row actually has — LineItem's optional columns
+// (itemCode/unit/taxRate/taxAmount) may be entirely absent.
+function rowFieldKeys(row: LineItem): FieldKey[] {
+  return ALL_FIELD_KEYS.filter((k) => row[k] !== undefined);
 }
 
-function firstNonValidField(row: BoqRow): (typeof FIELD_ORDER)[number] {
-  return FIELD_ORDER.find((f) => row[f].status && row[f].status !== "valid") ?? "description";
+// A field with no value was never extracted at all (build_line_items found
+// nothing for that column in this row) — it's a "not applicable" placeholder,
+// not a low-confidence read, and must never drag the row's displayed
+// confidence toward 0%. Only fields that actually have a value contribute.
+function rowConfidence(row: LineItem): number {
+  const scored = rowFieldKeys(row)
+    .map((k) => row[k]!)
+    .filter((f) => String(f.value).trim() !== "");
+  if (scored.length === 0) return 0;
+  return Math.min(...scored.map((f) => f.confidence));
 }
+
+function firstNonValidField(row: LineItem): FieldKey {
+  const keys = rowFieldKeys(row);
+  const withValue = keys.find(
+    (k) => row[k]!.status && row[k]!.status !== "valid" && String(row[k]!.value).trim() !== "",
+  );
+  if (withValue) return withValue;
+  return keys.find((k) => row[k]!.status && row[k]!.status !== "valid") ?? "description";
+}
+
+// Which columns to show at all — a document with no invoice-only fields
+// never gets an itemCode column, one with no `unit` on any row never gets
+// a Unit column, etc. Order: itemCode, description, quantity, unit, rate,
+// amount (tax fields feed validation but aren't given dedicated columns).
+function presentColumns(rows: LineItem[]): FieldKey[] {
+  const columns: FieldKey[] = [];
+  if (rows.some((r) => r.itemCode)) columns.push("itemCode");
+  columns.push("description", "quantity");
+  if (rows.some((r) => r.unit)) columns.push("unit");
+  columns.push("rate", "amount");
+  return columns;
+}
+
+const COLUMN_LABEL: Record<FieldKey, string> = {
+  itemCode: "Code",
+  description: "Description",
+  quantity: "Qty",
+  unit: "Unit",
+  rate: "Rate",
+  amount: "Amount",
+  taxRate: "Tax %",
+  taxAmount: "Tax",
+};
+
+const NUMERIC_COLUMNS: FieldKey[] = ["quantity", "rate", "amount", "taxRate", "taxAmount"];
 
 export default function BOQTable({
   result,
   onViewSource,
 }: {
   result: ProcessResult;
-  onViewSource: (row: BoqRow, field: (typeof FIELD_ORDER)[number]) => void;
+  onViewSource: (row: LineItem, field: FieldKey) => void;
 }) {
-  const { summary, boq } = result;
-  const shownRows = boq.slice(0, 20);
-  const moreCount = boq.length - shownRows.length;
+  const { summary, lineItems } = result;
+  const shownRows = lineItems.slice(0, 20);
+  const moreCount = lineItems.length - shownRows.length;
+  const columns = presentColumns(lineItems);
 
   return (
     <>
@@ -46,7 +87,7 @@ export default function BOQTable({
             </svg>
           </div>
           <span className="num">{summary.total_rows}</span>
-          <span className="lbl">BOQ rows</span>
+          <span className="lbl">Line items</span>
         </div>
         <div className="stat valid">
           <div className="top-row">
@@ -81,11 +122,11 @@ export default function BOQTable({
       <table className="boq">
         <thead>
           <tr>
-            <th>Description</th>
-            <th className="num">Qty</th>
-            <th>Unit</th>
-            <th className="num">Rate</th>
-            <th className="num">Amount</th>
+            {columns.map((col) => (
+              <th key={col} className={NUMERIC_COLUMNS.includes(col) ? "num" : undefined}>
+                {COLUMN_LABEL[col]}
+              </th>
+            ))}
             <th className="num">Confidence</th>
             <th></th>
           </tr>
@@ -98,17 +139,25 @@ export default function BOQTable({
             const needsReview = row.status !== "valid";
             return (
               <tr key={i} className={needsReview ? `status-${row.status}` : undefined}>
-                <td>
-                  <span className="desc-name">{row.description.value || "—"}</span>
-                  <span className={`engine-tag ${engine}`}>
-                    <span className="dot" />
-                    {ENGINE_LABEL[engine]}
-                  </span>
-                </td>
-                <td className="num">{row.quantity.value}</td>
-                <td>{row.unit.value}</td>
-                <td className="num">{row.rate.value}</td>
-                <td className="num">{row.amount.value}</td>
+                {columns.map((col) => {
+                  const field = row[col];
+                  if (col === "description") {
+                    return (
+                      <td key={col}>
+                        <span className="desc-name">{field?.value ?? "—"}</span>
+                        <span className={`engine-tag ${engine}`}>
+                          <span className="dot" />
+                          {ENGINE_LABEL[engine]}
+                        </span>
+                      </td>
+                    );
+                  }
+                  return (
+                    <td key={col} className={NUMERIC_COLUMNS.includes(col) ? "num" : undefined}>
+                      {field?.value ?? ""}
+                    </td>
+                  );
+                })}
                 <td className="conf-cell">
                   <span className={`conf-pill ${confClass}`}>
                     <span className="cdot" />

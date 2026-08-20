@@ -6,8 +6,9 @@ bundled dummy samples. Re-tune these constants once real documents are
 available.
 """
 
-NUMERIC_FIELDS = ("quantity", "rate", "amount")
-REQUIRED_FIELDS = ("description", "quantity", "unit")
+NUMERIC_FIELDS = ("quantity", "rate", "amount", "taxRate", "taxAmount")
+# "unit" is optional on LineItem (often absent on invoices) — never required.
+REQUIRED_FIELDS = ("description", "quantity", "rate", "amount")
 
 ARITHMETIC_RELATIVE_TOLERANCE = 0.02  # 2% — absorbs OCR/rounding noise
 ARITHMETIC_ABSOLUTE_TOLERANCE = 1.0  # floor so near-zero amounts aren't over-flagged
@@ -42,7 +43,23 @@ def combine_status(a: str, b: str) -> str:
 
 
 def evaluate_field(field_name: str, field: dict) -> tuple[str, list[str]]:
-    """Return (status, rules_triggered) for a single BoqField."""
+    """Return (status, rules_triggered) for a single BoqField.
+
+    A field with no value at all (build_boq found nothing for this column in
+    this row) is a DIFFERENT situation from a field that was extracted but
+    scored low confidence — the former was never "attempted" and must not be
+    judged by confidence_band(0.0), or every genuinely-empty non-required
+    column would read as "ambiguous garbage" and drag down row-level
+    aggregates. Only a missing REQUIRED field is actually a problem here.
+    """
+    value = field.get("value", "")
+    has_value = bool(str(value).strip())
+
+    if not has_value:
+        if field_name in REQUIRED_FIELDS:
+            return "ambiguous", ["required_field_missing"]
+        return "valid", []
+
     status = confidence_band(field.get("confidence", 0.0))
     rules: list[str] = []
     if status == "review":
@@ -50,23 +67,23 @@ def evaluate_field(field_name: str, field: dict) -> tuple[str, list[str]]:
     elif status == "ambiguous":
         rules.append("confidence_below_review_threshold")
 
-    value = field.get("value", "")
-
-    if field_name in REQUIRED_FIELDS and not str(value).strip():
-        status = combine_status(status, "ambiguous")
-        rules.append("required_field_missing")
-
-    if field_name in NUMERIC_FIELDS and str(value).strip() and parse_numeric(value) is None:
+    if field_name in NUMERIC_FIELDS and parse_numeric(value) is None:
         status = combine_status(status, "ambiguous")
         rules.append("numeric_parse_failure")
 
     return status, rules
 
 
+def _within_tolerance(amount: float, expected: float) -> bool:
+    tolerance = max(ARITHMETIC_ABSOLUTE_TOLERANCE, abs(expected) * ARITHMETIC_RELATIVE_TOLERANCE)
+    return abs(amount - expected) <= tolerance
+
+
 def evaluate_arithmetic(row: dict) -> tuple[str, list[str]] | None:
-    """amount ~ quantity * rate. Returns None when quantity/rate/amount
-    aren't all numeric — numeric_parse_failure already covers that case
-    per-field, so arithmetic doesn't need to double-flag it."""
+    """amount ~ quantity * rate, tolerant of tax-inclusive invoice amounts:
+    if the plain check fails but a taxAmount field is present and
+    quantity*rate + taxAmount ~ amount, that's still valid — not every
+    invoice line's "amount" is pre-tax."""
     quantity = parse_numeric(row["quantity"]["value"])
     rate = parse_numeric(row["rate"]["value"])
     amount = parse_numeric(row["amount"]["value"])
@@ -75,9 +92,13 @@ def evaluate_arithmetic(row: dict) -> tuple[str, list[str]] | None:
         return None
 
     expected = quantity * rate
-    tolerance = max(ARITHMETIC_ABSOLUTE_TOLERANCE, abs(expected) * ARITHMETIC_RELATIVE_TOLERANCE)
+    if _within_tolerance(amount, expected):
+        return "valid", []
 
-    if abs(amount - expected) > tolerance:
-        return "ambiguous", ["arithmetic_mismatch"]
+    tax_field = row.get("taxAmount")
+    if tax_field is not None:
+        tax_amount = parse_numeric(tax_field["value"])
+        if tax_amount is not None and _within_tolerance(amount, expected + tax_amount):
+            return "valid", []
 
-    return "valid", []
+    return "ambiguous", ["arithmetic_mismatch"]

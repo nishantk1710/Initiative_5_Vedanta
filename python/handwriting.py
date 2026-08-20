@@ -97,6 +97,9 @@ def extract_handwriting(layout: dict, image_path: str, document_id: str) -> list
                     "confidence": raw_conf / 100.0,  # normalize 0-100 -> 0-1
                     "page": page_number,
                     "bbox": page_bbox,
+                    "role": "line_item",
+                    "category": "handwriting",
+                    "region_id": f"{page_number}:handwriting:{region_index}",
                 }
             )
 

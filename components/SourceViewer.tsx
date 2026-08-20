@@ -1,12 +1,12 @@
 "use client";
 
-import type { BoqField, BoqRow } from "@/lib/types";
+import type { ExtractedValue, LineItem } from "@/lib/types";
 
 const VIEWPORT_WIDTH = 380;
 const VIEWPORT_HEIGHT = 260;
 const CROP_PADDING = 1.6; // show ~60% margin around the field's bbox for context
 
-const ENGINE_LABEL: Record<BoqField["source"], string> = {
+const ENGINE_LABEL: Record<ExtractedValue["source"], string> = {
   pymupdf: "PyMuPDF",
   paddleocr: "PaddleOCR",
   tesseract: "Tesseract",
@@ -21,13 +21,14 @@ export default function SourceViewer({
   onClose,
 }: {
   documentId: string;
-  row: BoqRow;
-  fieldName: "description" | "quantity" | "unit" | "rate" | "amount";
+  row: LineItem;
+  fieldName: keyof Pick<LineItem, "itemCode" | "description" | "quantity" | "unit" | "rate" | "amount" | "taxRate" | "taxAmount">;
   pageWidth: number;
   pageHeight: number;
   onClose: () => void;
 }) {
   const field = row[fieldName];
+  if (!field) return null;
   const [x0, y0, x1, y1] = field.bbox;
 
   const bboxWidthFrac = Math.max((x1 - x0) / pageWidth, 0.01);

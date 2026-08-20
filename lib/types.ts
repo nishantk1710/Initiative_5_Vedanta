@@ -1,45 +1,63 @@
 export type PageType = "digital" | "scanned";
 
-export interface ExtractedValue {
-  value: string;
+export type FieldStatus = "valid" | "review" | "ambiguous" | "incomplete";
+
+export interface ExtractedValue<T = string> {
+  value: T;
   source: "pymupdf" | "paddleocr" | "tesseract";
   confidence: number;
   page: number;
   bbox: [number, number, number, number];
-}
-
-export interface BoqField {
-  value: string;
-  source: "pymupdf" | "paddleocr" | "tesseract";
-  confidence: number;
-  page: number;
-  bbox: [number, number, number, number];
-  status?: "valid" | "review" | "ambiguous";
+  status?: FieldStatus;
   rules_triggered?: string[];
 }
 
-export interface BoqRow {
-  description: BoqField;
-  quantity: BoqField;
-  unit: BoqField;
-  rate: BoqField;
-  amount: BoqField;
-  status: "valid" | "review" | "ambiguous";
+// Generalized from BOQ-only rows to invoices/receipts too. Optional fields
+// are omitted entirely (not present as a key) when not applicable to the
+// document — an invoice row has no `unit`, a BOQ row has no `itemCode`.
+// Numeric fields are typed ExtractedValue<number>, but a value that failed
+// to parse (e.g. OCR misread "12S0") is left as the raw string so
+// numeric_parse_failure can still surface it — treat `value` defensively.
+export interface LineItem {
+  itemCode?: ExtractedValue<string>; // HSN/SKU code — invoices only
+  description: ExtractedValue<string>;
+  quantity: ExtractedValue<number | string>;
+  unit?: ExtractedValue<string>; // m3/hr — mostly BOQ, often absent on invoices
+  rate: ExtractedValue<number | string>;
+  amount: ExtractedValue<number | string>;
+  taxRate?: ExtractedValue<number | string>; // invoices only
+  taxAmount?: ExtractedValue<number | string>; // invoices only
+  status: FieldStatus;
   rules_triggered?: string[];
+}
+
+export type DocumentType = "boq" | "invoice" | "unknown";
+
+// Extracted separately from line items via lightweight pattern matching
+// against header/receiver/footer text — never from table content.
+export interface DocumentMetadata {
+  documentType: DocumentType;
+  vendor?: string;
+  invoiceNumber?: string;
+  date?: string;
+  buyer?: string;
+  totals?: { subtotal?: number; tax?: number; grandTotal?: number };
 }
 
 export interface ProcessResult {
   document_id: string;
-  document_type: string;
+  document_type: DocumentType;
   pages_processed: number;
   status: string;
+  metadata: DocumentMetadata;
   summary: {
     total_rows: number;
     valid_rows: number;
     review_rows: number;
+    incomplete_rows: number;
     llm_normalized_fields: number;
   };
-  boq: BoqRow[];
+  lineItems: LineItem[];
 }
 
 export type SelectedSource =

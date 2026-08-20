@@ -28,12 +28,16 @@ def warm_up() -> None:
 
 
 def extract_printed(layout: dict, image_path: str, document_id: str) -> list[dict]:
-    """Crop each kept table/printed-text region from the rendered page image,
-    run PaddleOCR on the crop, and return one ExtractedValue-shaped dict per
-    detected text element. Crops are saved under results/<document_id>/regions/
-    for provenance."""
+    """Crop every kept non-handwriting region from the rendered page image
+    (table, printed_text, unrelated_header, legal_text — i.e. every text-
+    bearing region select_regions() didn't drop as pure logo/image), run
+    PaddleOCR on each crop, and return one ExtractedValue-shaped dict per
+    detected text element, tagged with the region's `role` ("line_item" or
+    "metadata") and `category` so callers can route header/receiver/totals
+    text to metadata extraction while keeping it out of line-item building.
+    Crops are saved under results/<document_id>/regions/ for provenance."""
     page_number = layout["page"]
-    regions = [r for r in layout["regions"] if r.get("category") in ("table", "printed_text")]
+    regions = [r for r in layout["regions"] if r.get("category") != "handwriting"]
     if not regions:
         return []
 
@@ -95,6 +99,13 @@ def extract_printed(layout: dict, image_path: str, document_id: str) -> list[dic
                         "confidence": score,
                         "page": page_number,
                         "bbox": page_bbox,
+                        "role": region.get("role", "metadata"),
+                        "category": region["category"],
+                        # groups OCR output back to the specific table region
+                        # it came from, so line_items.py can find a header
+                        # row and map columns per-table rather than mixing
+                        # text from unrelated tables/regions together
+                        "region_id": f"{page_number}:{region['category']}:{region_index}",
                     }
                 )
 

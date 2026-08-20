@@ -25,7 +25,11 @@ _SYSTEM_PROMPT = (
     '"confidence": 0.0} with no extra text, no markdown fencing.'
 )
 
-FIELD_NAMES = ("description", "quantity", "unit", "rate", "amount")
+_FIELD_KEYS = ("description", "quantity", "unit", "rate", "amount", "itemCode", "taxRate", "taxAmount")
+
+
+def _row_field_names(row: dict) -> list[str]:
+    return [name for name in _FIELD_KEYS if name in row]
 
 
 def _call_azure_foundry(payload: dict) -> dict | None:
@@ -93,9 +97,18 @@ def normalize_ambiguous(validated_rows: list[dict]) -> tuple[list[dict], int]:
     llm_normalized_fields = 0
 
     for row in validated_rows:
-        for field_name in FIELD_NAMES:
+        if row.get("status") == "incomplete":
+            continue  # nothing structured to normalize — column mapping itself failed
+
+        for field_name in _row_field_names(row):
             field = row[field_name]
             if field.get("status") != "ambiguous":
+                continue
+            if not str(field.get("value", "")).strip():
+                # required field missing entirely (rules.py:required_field_missing)
+                # — there is no OCR value to correct, only re-extraction could
+                # fix this, so leave it ambiguous rather than send an empty
+                # payload to the LLM
                 continue
 
             payload = {
@@ -105,7 +118,7 @@ def normalize_ambiguous(validated_rows: list[dict]) -> tuple[list[dict], int]:
                 "context": {
                     "description": row["description"]["value"],
                     "quantity": row["quantity"]["value"],
-                    "unit": row["unit"]["value"],
+                    "unit": row["unit"]["value"] if "unit" in row else None,
                 },
                 "validation_error": field.get("rules_triggered", []),
             }
@@ -120,9 +133,14 @@ def normalize_ambiguous(validated_rows: list[dict]) -> tuple[list[dict], int]:
             field["rules_triggered"] = field.get("rules_triggered", []) + ["llm_normalized"]
             llm_normalized_fields += 1
 
-    # re-derive each row's overall status from its (possibly just-updated) fields
+    # re-derive each row's overall status from its (possibly just-updated)
+    # fields — except "incomplete" rows, which never went through per-field
+    # evaluation and must keep that status rather than be recomputed as if
+    # they had normal field statuses to aggregate.
     for row in validated_rows:
-        statuses = [row[name]["status"] for name in FIELD_NAMES]
+        if row.get("status") == "incomplete":
+            continue
+        statuses = [row[name]["status"] for name in _row_field_names(row)]
         if "ambiguous" in statuses:
             row["status"] = "ambiguous"
         elif "review" in statuses:

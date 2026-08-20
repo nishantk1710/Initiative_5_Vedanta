@@ -41,15 +41,15 @@ export default function SOWUploader({
         </svg>
       </div>
       <p className="primary">Drag &amp; drop your SOW</p>
-      <p className="secondary">PDF only · up to 25MB</p>
+      <p className="secondary">PDF, PNG, or JPEG · up to 25MB</p>
       <button type="button" className="browse-btn" onClick={() => inputRef.current?.click()}>
-        Browse PDF
+        Browse file
       </button>
       <input
         ref={inputRef}
         id="fileInput"
         type="file"
-        accept="application/pdf,.pdf"
+        accept="application/pdf,.pdf,image/png,.png,image/jpeg,.jpg,.jpeg"
         onChange={(e) => handleFile(e.target.files?.[0])}
       />
     </div>

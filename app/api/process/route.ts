@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import path from "path";
 import { z } from "zod";
 import { processDocument } from "@/lib/python-client";
+import { resolveUploadedFilePath } from "@/lib/uploaded-file";
 
 export const runtime = "nodejs";
 
@@ -27,7 +28,11 @@ export async function POST(request: Request) {
 
   const { documentId } = result.data;
   const safeId = path.basename(documentId);
-  const filePath = path.join(process.cwd(), "uploads", `${safeId}.pdf`);
+  const uploadsDir = path.join(process.cwd(), "uploads");
+  const filePath = await resolveUploadedFilePath(uploadsDir, safeId);
+  if (!filePath) {
+    return NextResponse.json({ error: `No uploaded file found for document ${safeId}` }, { status: 404 });
+  }
 
   try {
     const routeResult = await processDocument(safeId, filePath);

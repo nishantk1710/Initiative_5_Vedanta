@@ -3,11 +3,11 @@ import { randomUUID } from "crypto";
 import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import { z } from "zod";
+import { detectFileExtension } from "@/lib/uploaded-file";
 
 export const runtime = "nodejs";
 
 const MAX_SIZE_BYTES = 25 * 1024 * 1024;
-const PDF_MAGIC_BYTES = Buffer.from("%PDF-");
 
 const metadataSchema = z
   .object({
@@ -17,7 +17,7 @@ const metadataSchema = z
 
 function sanitizeFilename(name: string): string {
   const base = path.basename(name).replace(/[^a-zA-Z0-9._-]/g, "_");
-  return base.length > 0 ? base : "upload.pdf";
+  return base.length > 0 ? base : "upload";
 }
 
 export async function POST(request: Request) {
@@ -58,20 +58,20 @@ export async function POST(request: Request) {
 
   const buffer = Buffer.from(await file.arrayBuffer());
 
-  const isPdf = buffer.subarray(0, PDF_MAGIC_BYTES.length).equals(PDF_MAGIC_BYTES);
-  if (!isPdf) {
+  const ext = detectFileExtension(buffer);
+  if (!ext) {
     return NextResponse.json(
-      { error: "File is not a valid PDF (magic bytes mismatch)" },
+      { error: "Unsupported file type — only PDF, PNG, and JPEG are accepted (checked by content, not filename)" },
       { status: 400 },
     );
   }
 
-  const sanitizedName = sanitizeFilename(file.name || "upload.pdf");
+  const sanitizedName = sanitizeFilename(file.name || `upload.${ext}`);
   const documentId = randomUUID().slice(0, 8);
 
   const uploadsDir = path.join(process.cwd(), "uploads");
   await mkdir(uploadsDir, { recursive: true });
-  const destPath = path.join(uploadsDir, `${documentId}.pdf`);
+  const destPath = path.join(uploadsDir, `${documentId}.${ext}`);
   await writeFile(destPath, buffer);
 
   return NextResponse.json({
