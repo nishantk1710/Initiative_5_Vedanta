@@ -7,15 +7,9 @@ vars only; never hardcode them, never expose via NEXT_PUBLIC_*.
 """
 
 import json
-import os
-from urllib import request as urllib_request
-from urllib.error import HTTPError, URLError
 
-AZURE_FOUNDRY_ENDPOINT = os.environ.get("AZURE_FOUNDRY_ENDPOINT", "")
-AZURE_FOUNDRY_API_KEY = os.environ.get("AZURE_FOUNDRY_API_KEY", "")
-AZURE_FOUNDRY_MODEL = os.environ.get("AZURE_FOUNDRY_MODEL", "")
-
-REQUEST_TIMEOUT_SECONDS = 20
+from llm_client import post_chat_json
+import correction
 
 _SYSTEM_PROMPT = (
     "You are normalizing a single ambiguous field extracted from a scanned "
@@ -26,6 +20,7 @@ _SYSTEM_PROMPT = (
 )
 
 _FIELD_KEYS = ("description", "quantity", "unit", "rate", "amount", "itemCode", "taxRate", "taxAmount")
+CORRELATED_ARITHMETIC_FIELDS = ("quantity", "rate", "amount", "taxAmount")
 
 
 def _row_field_names(row: dict) -> list[str]:
@@ -37,43 +32,8 @@ def _call_azure_foundry(payload: dict) -> dict | None:
     the parsed {field, normalized_value, confidence} response, or None on
     any failure/malformed response. Never raises — a failed normalization
     just leaves the field ambiguous rather than crashing the pipeline."""
-    if not (AZURE_FOUNDRY_ENDPOINT and AZURE_FOUNDRY_API_KEY and AZURE_FOUNDRY_MODEL):
-        print("[llm] Azure Foundry not configured (missing endpoint/key/model) — leaving field ambiguous")
-        return None
-
-    body = json.dumps(
-        {
-            "model": AZURE_FOUNDRY_MODEL,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(payload)},
-            ],
-            "temperature": 0,
-        }
-    ).encode("utf-8")
-
-    req = urllib_request.Request(
-        AZURE_FOUNDRY_ENDPOINT,
-        data=body,
-        headers={"Content-Type": "application/json", "api-key": AZURE_FOUNDRY_API_KEY},
-        method="POST",
-    )
-
-    try:
-        with urllib_request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
-            envelope = json.loads(resp.read().decode("utf-8"))
-    except (URLError, HTTPError, TimeoutError) as exc:
-        print(f"[llm] Azure Foundry request failed: {exc}")
-        return None
-    except json.JSONDecodeError as exc:
-        print(f"[llm] Azure Foundry returned an invalid JSON envelope: {exc}")
-        return None
-
-    try:
-        content = envelope["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        print(f"[llm] Azure Foundry response missing expected shape: {exc}")
+    parsed = post_chat_json(_SYSTEM_PROMPT, json.dumps(payload), log_prefix="llm")
+    if parsed is None:
         return None
 
     if not isinstance(parsed, dict) or not {"field", "normalized_value", "confidence"} <= parsed.keys():
@@ -100,9 +60,30 @@ def normalize_ambiguous(validated_rows: list[dict]) -> tuple[list[dict], int]:
         if row.get("status") == "incomplete":
             continue  # nothing structured to normalize — column mapping itself failed
 
+        # Arithmetic mismatches go through the safe-correction protocol
+        # FIRST, once per row, with the full correlated context — not the
+        # single-field flow below. That flow sending only "here's a value,
+        # fix it" is exactly what let a misread quantity get "fixed" by
+        # corrupting a correct amount: the model only ever saw the one
+        # field validator.py happened to flag, with no way to know a
+        # different field was actually the problem.
+        has_arithmetic_issue = any(
+            "arithmetic_mismatch" in row[name].get("rules_triggered", [])
+            for name in _row_field_names(row)
+            if name in CORRELATED_ARITHMETIC_FIELDS
+        )
+        if has_arithmetic_issue:
+            proposal = correction.propose_correction(row)
+            if proposal is not None and correction.apply_if_safe(row, proposal):
+                llm_normalized_fields += 1
+
         for field_name in _row_field_names(row):
             field = row[field_name]
             if field.get("status") != "ambiguous":
+                continue
+            if field.get("source") == "llm":
+                # already produced by llm_line_items.py — asking the same
+                # model to normalize its own output is circular, so leave it
                 continue
             if not str(field.get("value", "")).strip():
                 # required field missing entirely (rules.py:required_field_missing)
@@ -140,12 +121,20 @@ def normalize_ambiguous(validated_rows: list[dict]) -> tuple[list[dict], int]:
     for row in validated_rows:
         if row.get("status") == "incomplete":
             continue
-        statuses = [row[name]["status"] for name in _row_field_names(row)]
+        field_names = _row_field_names(row)
+        statuses = [row[name]["status"] for name in field_names]
         if "ambiguous" in statuses:
             row["status"] = "ambiguous"
         elif "review" in statuses:
             row["status"] = "review"
         else:
             row["status"] = "valid"
+
+        # A row whose structure came from the LLM never re-derives to
+        # "valid" — validator.py floored it at "review" and that floor must
+        # survive this recomputation, independent of how the individual
+        # field confidences happen to band.
+        if row["status"] == "valid" and any(row[name].get("source") == "llm" for name in field_names):
+            row["status"] = "review"
 
     return validated_rows, llm_normalized_fields

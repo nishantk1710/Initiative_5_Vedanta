@@ -22,6 +22,20 @@ paddlex[ocr]==3.7.2
 pytesseract
 opencv-python
 
+# PaddleOCR-VL-0.9B does NOT run in this environment or this venv — it needs
+# paddlepaddle>=3.2.0 (its safetensors loader only handles bfloat16 weights
+# natively from that version; below it, loading falls back through numpy,
+# which has no bfloat16 type, and raises "data type 'bfloat16' not
+# understood"). This service is pinned to paddlepaddle==3.1.0 for PP-
+# StructureV3's layout detector, which hits a DIFFERENT bug on
+# paddlepaddle>=3.2 on Windows CPU. Both constraints are real, so
+# PaddleOCR-VL runs as a separate microservice in its own venv — see
+# python_vl_service/requirements.txt and its module docstring.
+
+# Tests (python/tests/). Fast suite runs in ~26s; `-m slow` runs the real
+# OCR pipeline and takes ~20 min. See python/tests/README.md.
+pytest
+
 # Install with (Windows/venv):
 #   pip install -r requirements.txt
 # On Debian/Ubuntu system Python (externally-managed-environment), add:

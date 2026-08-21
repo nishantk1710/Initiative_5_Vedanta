@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import path from "path";
 import { z } from "zod";
-import { processDocument } from "@/lib/python-client";
+import { startProcessing } from "@/lib/python-client";
 import { resolveUploadedFilePath } from "@/lib/uploaded-file";
 
 export const runtime = "nodejs";
@@ -35,11 +35,15 @@ export async function POST(request: Request) {
   }
 
   try {
-    const routeResult = await processDocument(safeId, filePath);
+    // Returns immediately — the actual pipeline runs as a background task
+    // on the Python service. Poll /api/status/{documentId} for real
+    // per-page progress; fetch /api/result/{documentId} once it reports
+    // status "completed".
+    const routeResult = await startProcessing(safeId, filePath);
     return NextResponse.json(routeResult);
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Processing failed" },
+      { error: err instanceof Error ? err.message : "Failed to start processing" },
       { status: 502 },
     );
   }

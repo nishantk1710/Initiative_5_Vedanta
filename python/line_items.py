@@ -179,26 +179,47 @@ def _columns_for(bands: dict[str, tuple[float, float]] | None) -> list[str]:
     return columns
 
 
-def _build_from_table_region(region_id: str, values: list[dict]) -> tuple[list[dict], list[str]]:
+def _build_from_table_region(region_id: str, values: list[dict]) -> tuple[list[dict], list[str], list[dict]]:
     """One detected TABLE region -> its own header search + column mapping,
     confined entirely to this region's own rows. Returns (rows, leftover
-    text lines to route to metadata — used when this 'table' turns out to be
-    a non-line-item summary box, e.g. a GST breakdown)."""
+    text lines to route to metadata, raw values to hand to the generic table
+    reconstructor) — the second and third elements are only ever populated
+    together, when this 'table' turns out not to be a line-item table at
+    all (e.g. a GST breakdown, or a bank statement's transaction table).
+    Metadata extraction still gets the flattened text either way; the raw
+    values additionally let a later stage attempt a generic (non-BOQ/
+    invoice) physical reconstruction instead of discarding the structure."""
     page = values[0]["page"]
     rows = _group_rows_by_y(values)
 
+    # Two passes, strongest first. A single call with min_matched=2 can only
+    # ever yield 0 or >=2 matches, which left the "exactly 1" branch below
+    # unreachable — so a table with one recognisable column was silently
+    # treated as "not a table" instead of the honest "incomplete".
+    #
+    # Order matters: the >=2 pass runs first so a well-formed header is still
+    # preferred over some earlier row that happens to contain a single
+    # keyword (a "Total" line above the table, say) and would otherwise
+    # shadow it.
     header = _detect_header_row(rows, min_matched=TABLE_HEADER_INCOMPLETE_THRESHOLD + 1)
     if header is None:
+        header = _detect_header_row(rows, min_matched=1)
+
+    if header is None:
         matched_count = 0
+        header_index, bands = None, None
     else:
         header_index, bands = header
         matched_count = len(bands)
 
     if matched_count <= TABLE_HEADER_METADATA_THRESHOLD:
-        # Not a line-item table at all (e.g. a tax/GST summary box) — hand
-        # its text to metadata extraction instead of fabricating rows.
+        # Not a line-item table at all (e.g. a tax/GST summary box, or a
+        # bank statement's transaction table) — hand its text to metadata
+        # extraction, AND hand its raw values back so a generic reconstructor
+        # gets a chance at whatever real structure this table does have,
+        # instead of only ever treating it as unstructured leftover text.
         leftover = [" ".join(v["value"] for v in sorted(row, key=lambda v: v["bbox"][0])) for row in rows]
-        return [], leftover
+        return [], leftover, values
 
     if matched_count <= TABLE_HEADER_INCOMPLETE_THRESHOLD:
         # Found *a* header-like row but not enough of our known columns to
@@ -212,7 +233,7 @@ def _build_from_table_region(region_id: str, values: list[dict]) -> tuple[list[d
             row["description"]["value"] = raw_text
             row["_status_override"] = "incomplete"
             line_items.append(row)
-        return line_items, []
+        return line_items, [], []
 
     data_rows = rows[header_index + 1 :]
     columns = _columns_for(bands)
@@ -220,7 +241,7 @@ def _build_from_table_region(region_id: str, values: list[dict]) -> tuple[list[d
     for row_values in data_rows:
         assigned = _assign_by_bands(row_values, bands)
         line_items.append({column: _merge_field(column, assigned.get(column, []), page) for column in columns})
-    return line_items, []
+    return line_items, [], []
 
 
 def _build_from_loose_text(values: list[dict]) -> list[dict]:
@@ -243,21 +264,30 @@ def _build_from_loose_text(values: list[dict]) -> list[dict]:
             if header_index is not None and row_index == header_index:
                 continue  # this row IS the header row itself; skip as data
             assigned = _assign_by_bands(row_values, bands) if bands else _assign_by_position(row_values)
-            line_items.append(
-                {column: _merge_field(column, assigned.get(column, []), page) for column in columns}
-            )
+            row = {column: _merge_field(column, assigned.get(column, []), page) for column in columns}
+            if not bands:
+                # no header row was ever identified on this page, so this
+                # column assignment is a blind left-to-right position guess,
+                # not a confident read — pipeline.py uses this marker to
+                # decide whether the LLM fallback should override it
+                row["_position_guessed"] = True
+            line_items.append(row)
 
     return line_items
 
 
-def build_line_items(values: list[dict]) -> tuple[list[dict], list[str]]:
+def build_line_items(values: list[dict]) -> tuple[list[dict], list[str], dict[str, list[dict]]]:
     """Reconstruct line items from role=="line_item" ExtractedValue-shaped
     dicts (mixed PyMuPDF/PaddleOCR/Tesseract) using bbox geometry only.
 
-    Returns (line_items, leftover_metadata_texts) — the second element
-    holds text from table-shaped regions that turned out NOT to be
-    line-item tables (e.g. a GST summary box), for extract_metadata() to
-    scan for totals.
+    Returns (line_items, leftover_metadata_texts, non_line_item_tables):
+    - leftover_metadata_texts holds flattened text from table-shaped regions
+      that turned out NOT to be line-item tables (e.g. a GST summary box),
+      for extract_metadata() to scan for totals.
+    - non_line_item_tables maps region_id -> that region's raw values, for
+      the SAME regions as above, so a generic (non-BOQ/invoice) physical
+      table reconstruction can still be attempted on them rather than the
+      structure being discarded outright — see generic_tables.py.
     """
     by_region: dict[str, list[dict]] = defaultdict(list)
     loose: list[dict] = []
@@ -270,12 +300,15 @@ def build_line_items(values: list[dict]) -> tuple[list[dict], list[str]]:
 
     line_items: list[dict] = []
     leftover_texts: list[str] = []
+    non_line_item_tables: dict[str, list[dict]] = {}
 
     for region_id, region_values in by_region.items():
-        rows, leftover = _build_from_table_region(region_id, region_values)
+        rows, leftover, raw_values = _build_from_table_region(region_id, region_values)
         line_items.extend(rows)
         leftover_texts.extend(leftover)
+        if raw_values:
+            non_line_item_tables[region_id] = raw_values
 
     line_items.extend(_build_from_loose_text(loose))
 
-    return line_items, leftover_texts
+    return line_items, leftover_texts, non_line_item_tables

@@ -79,26 +79,56 @@ def _within_tolerance(amount: float, expected: float) -> bool:
     return abs(amount - expected) <= tolerance
 
 
-def evaluate_arithmetic(row: dict) -> tuple[str, list[str]] | None:
+def evaluate_arithmetic(row: dict) -> tuple[str, list[str], str | None] | None:
     """amount ~ quantity * rate, tolerant of tax-inclusive invoice amounts:
     if the plain check fails but a taxAmount field is present and
     quantity*rate + taxAmount ~ amount, that's still valid — not every
-    invoice line's "amount" is pre-tax."""
-    quantity = parse_numeric(row["quantity"]["value"])
-    rate = parse_numeric(row["rate"]["value"])
-    amount = parse_numeric(row["amount"]["value"])
+    invoice line's "amount" is pre-tax.
+
+    Returns None (no verdict) whenever quantity/rate/amount aren't all
+    present and numeric — quantity and rate are optional on LineItem, and a
+    row that never reported a unit rate has no arithmetic to check rather
+    than a failed check.
+
+    On a mismatch, the third element names the SUSPECT field — the lowest-
+    confidence of quantity/rate/amount — rather than unconditionally
+    `amount`. This is a deterministic first-pass guess, cheap and immediate
+    (no LLM needed): the three correlated fields came from the same OCR
+    pass, so the one the engine itself was least sure about is the more
+    likely misread, and the equation gives no independent evidence pointing
+    at any specific one of the three. Blaming `amount` regardless of which
+    field actually scored lowest is what let a misread quantity (1.1 -> 11)
+    get "corrected" by rewriting an already-correct amount (19800 -> 198000)
+    — verified live on a real document. correction.py's LLM-backed proposal
+    step still runs on top of this guess and is subject to its own
+    acceptance gate; this only fixes where the rule attaches, not whether a
+    value ever actually gets mutated.
+    """
+    quantity_field = row.get("quantity")
+    rate_field = row.get("rate")
+    amount_field = row.get("amount")
+    if quantity_field is None or rate_field is None or amount_field is None:
+        return None
+
+    quantity = parse_numeric(quantity_field["value"])
+    rate = parse_numeric(rate_field["value"])
+    amount = parse_numeric(amount_field["value"])
 
     if quantity is None or rate is None or amount is None:
         return None
 
     expected = quantity * rate
     if _within_tolerance(amount, expected):
-        return "valid", []
+        return "valid", [], None
 
     tax_field = row.get("taxAmount")
     if tax_field is not None:
         tax_amount = parse_numeric(tax_field["value"])
         if tax_amount is not None and _within_tolerance(amount, expected + tax_amount):
-            return "valid", []
+            return "valid", [], None
 
-    return "ambiguous", ["arithmetic_mismatch"]
+    suspect_field = min(
+        ("quantity", "rate", "amount"),
+        key=lambda name: row[name].get("confidence", 0.0),
+    )
+    return "ambiguous", ["arithmetic_mismatch"], suspect_field

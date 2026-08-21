@@ -6,7 +6,9 @@ import SampleSOWs from "@/components/SampleSOWs";
 import SOWUploader from "@/components/SOWUploader";
 import Stepper from "@/components/Stepper";
 import ProcessingStatus, { type ProcessingPhase } from "@/components/ProcessingStatus";
-import type { PageRegionsEntry, PageRoute, SampleMetadata, SelectedSource, UploadResponse } from "@/lib/types";
+import type { PageRegionsEntry, PageRoute, ProcessingProgress, SampleMetadata, SelectedSource, UploadResponse } from "@/lib/types";
+
+const POLL_INTERVAL_MS = 1500;
 import sampleMetadata from "@/lib/sample-metadata.json";
 
 const SAMPLE_METADATA = sampleMetadata as Record<string, SampleMetadata>;
@@ -33,6 +35,10 @@ export default function Home() {
   const [regionsByPage, setRegionsByPage] = useState<Map<number, PageRegionsEntry>>(new Map());
   const [currentPage, setCurrentPage] = useState(1);
   const [processingStartedAt, setProcessingStartedAt] = useState<number | null>(null);
+  const [progress, setProgress] = useState<ProcessingProgress | null>(null);
+  // Set once POST /api/process has accepted the job — starts the polling
+  // effect below. Cleared when the job reaches a terminal state.
+  const [pollingJobId, setPollingJobId] = useState<string | null>(null);
 
   const busyRef = useRef(false);
   // Caches the in-flight upload+prepare call for the CURRENT `selected`
@@ -154,9 +160,14 @@ export default function Home() {
       // rather than forcing the user through boring digital-only pages
       setCurrentPage(routedPages.find((p) => p.type === "scanned")?.page ?? routedPages[0]?.page ?? 1);
       setProcessingStartedAt(Date.now());
+      setProgress(null);
       setPhase("processing");
       setView("processing");
 
+      // Returns immediately with the job's real page count — the actual
+      // pipeline runs as a background task on the Python service, so a
+      // 10+ page scanned document (10-15+ min) never times out an HTTP
+      // request. Real per-page progress arrives via the polling effect.
       const processRes = await fetch("/api/process", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -164,22 +175,10 @@ export default function Home() {
       });
       if (!processRes.ok) {
         const body = await processRes.json().catch(() => ({}));
-        throw new Error(body.error ?? `Processing failed (${processRes.status})`);
+        throw new Error(body.error ?? `Failed to start processing (${processRes.status})`);
       }
 
-      // fetch every page's real detected regions now that processing wrote
-      // regions.json — this is the ONLY point at which region data exists at
-      // all (the backend is one synchronous call with no incremental
-      // progress), so boxes can't appear any earlier than this, honestly.
-      const pagesRes = await fetch(`/api/result/${currentDocumentId}/pages`);
-      if (pagesRes.ok) {
-        const pagesData = (await pagesRes.json()) as PageRegionsEntry[];
-        setRegionsByPage(new Map(pagesData.map((p) => [p.page, p])));
-      }
-
-      setPhase("done");
-      // stay on this view so the user can actually see the boxes and page
-      // through the document — navigate to /results only when they choose to
+      setPollingJobId(currentDocumentId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setView("home");
@@ -189,8 +188,52 @@ export default function Home() {
     }
   }
 
-  const hasDigital = pages?.some((p) => p.type === "digital") ?? false;
-  const hasScanned = pages?.some((p) => p.type === "scanned") ?? false;
+  // Polls real job status while the background pipeline runs. Every value
+  // shown in the processing view comes from these responses — nothing is
+  // simulated with a timer, so the UI reads correctly whether a page's
+  // stage takes 200ms (digital) or 90s (scanned).
+  useEffect(() => {
+    if (!pollingJobId) return;
+    let cancelled = false;
+
+    async function poll() {
+      const res = await fetch(`/api/status/${pollingJobId}`);
+      if (!res.ok || cancelled) return;
+      const data = (await res.json()) as ProcessingProgress;
+      if (cancelled) return;
+      setProgress(data);
+
+      if (data.status === "completed" || data.status === "error") {
+        setPollingJobId(null);
+        if (data.status === "error") {
+          setError(data.error ?? "Processing failed");
+          setView("home");
+          return;
+        }
+        // regions.json is written by the pipeline, so it only exists now
+        // that the job genuinely completed
+        const pagesRes = await fetch(`/api/result/${pollingJobId}/pages`);
+        if (pagesRes.ok && !cancelled) {
+          const pagesData = (await pagesRes.json()) as PageRegionsEntry[];
+          setRegionsByPage(new Map(pagesData.map((p) => [p.page, p])));
+        }
+        if (!cancelled) setPhase("done");
+      }
+    }
+
+    poll().catch(() => {
+      // a single failed poll is not fatal — the interval will retry
+    });
+    const interval = setInterval(() => {
+      poll().catch(() => {});
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [pollingJobId]);
+
   const digitalCount = pages?.filter((p) => p.type === "digital").length ?? 0;
   const scannedCount = pages?.filter((p) => p.type === "scanned").length ?? 0;
 
@@ -283,12 +326,11 @@ export default function Home() {
               currentPage={currentPage}
               onPageChange={setCurrentPage}
               regionsByPage={regionsByPage}
-              hasDigital={hasDigital}
-              hasScanned={hasScanned}
               digitalCount={digitalCount}
               scannedCount={scannedCount}
               phase={phase}
               startedAt={processingStartedAt}
+              progress={progress}
             />
             {phase === "done" && (
               <div style={{ padding: "0 38px 30px" }}>

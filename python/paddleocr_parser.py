@@ -27,6 +27,64 @@ def warm_up() -> None:
     _get_ocr_engine()
 
 
+def _collect_ocr_values(results, page_number: int, offset_x: float, offset_y: float) -> list[dict]:
+    """Flatten PaddleOCR predict() output into ExtractedValue-shaped dicts,
+    translating each detected box from image-local into full-page
+    coordinates via (offset_x, offset_y)."""
+    values: list[dict] = []
+    for result in results:
+        texts = result.get("rec_texts") or []
+        scores = result.get("rec_scores") or []
+        boxes = result.get("rec_boxes")
+        if boxes is None:
+            boxes = result.get("rec_polys") or []
+
+        for i, text in enumerate(texts):
+            if not text or not text.strip():
+                continue
+            score = float(scores[i]) if i < len(scores) else 0.0
+
+            if i < len(boxes) and len(boxes[i]) == 4 and not hasattr(boxes[i][0], "__len__"):
+                bx0, by0, bx1, by1 = boxes[i]
+            elif i < len(boxes):
+                xs = [p[0] for p in boxes[i]]
+                ys = [p[1] for p in boxes[i]]
+                bx0, by0, bx1, by1 = min(xs), min(ys), max(xs), max(ys)
+            else:
+                continue
+
+            values.append(
+                {
+                    "value": text.strip(),
+                    "source": "paddleocr",
+                    "confidence": score,
+                    "page": page_number,
+                    "bbox": [
+                        float(offset_x + bx0),
+                        float(offset_y + by0),
+                        float(offset_x + bx1),
+                        float(offset_y + by1),
+                    ],
+                }
+            )
+    return values
+
+
+def ocr_full_page(image_path: str, page_number: int) -> list[dict]:
+    """OCR an ENTIRE rendered page image, ignoring layout regions entirely.
+
+    Needed because PP-StructureV3 sometimes detects only a fraction of a
+    page (e.g. on a borderless POS receipt it may return a single header
+    text block and nothing else). Region-confined OCR would then never see
+    the item list at all, so the invoice fallback path in invoice_lines.py
+    OCRs the whole page and pattern-matches the text instead of relying on
+    visual table detection.
+    """
+    engine = _get_ocr_engine()
+    results = engine.predict(image_path)
+    return _collect_ocr_values(results, page_number, 0.0, 0.0)
+
+
 def extract_printed(layout: dict, image_path: str, document_id: str) -> list[dict]:
     """Crop every kept non-handwriting region from the rendered page image
     (table, printed_text, unrelated_header, legal_text — i.e. every text-

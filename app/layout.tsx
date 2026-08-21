@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono, Caveat } from "next/font/google";
+import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
 const spaceGrotesk = Space_Grotesk({
@@ -20,12 +20,6 @@ const ibmPlexMono = IBM_Plex_Mono({
   weight: ["400", "500", "600"],
 });
 
-const caveat = Caveat({
-  variable: "--font-hand",
-  subsets: ["latin"],
-  weight: ["500", "600"],
-});
-
 export const metadata: Metadata = {
   title: "Mining SOW Extractor",
   description: "Scope-of-work to structured BOQ extraction",
@@ -35,7 +29,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${spaceGrotesk.variable} ${ibmPlexSans.variable} ${ibmPlexMono.variable} ${caveat.variable}`}
+      className={`${spaceGrotesk.variable} ${ibmPlexSans.variable} ${ibmPlexMono.variable}`}
     >
       <body>{children}</body>
     </html>

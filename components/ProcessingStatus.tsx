@@ -1,110 +1,29 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { PageRegionsEntry, PageRoute } from "@/lib/types";
+import type { PageRegionsEntry, PageRoute, ProcessingProgress, StageGroupName, StageGroupState } from "@/lib/types";
+import StageCards, { type StageGroup, type Step, type StepState } from "@/components/StageCards";
 
 export type ProcessingPhase = "preparing" | "processing" | "done";
 
-interface Stage {
-  label: string;
-  subtitle: string;
-  banner: string;
-  applicable: boolean;
+const GROUP_ORDER: StageGroupName[] = ["prescan", "ocr", "structure", "decide"];
+
+// Descriptive subtitles for each group — informational copy only, never a
+// source of truth for state (that always comes from `progress`).
+const GROUP_INFO: Record<StageGroupName, { name: string; subtitle: string }> = {
+  prescan: { name: "Pre-scan", subtitle: "Rendering the page and checking scan quality" },
+  ocr: { name: "OCR", subtitle: "Detecting layout and reading text/handwriting" },
+  structure: { name: "Structure", subtitle: "Classifying the document and building its structure" },
+  decide: { name: "Decide", subtitle: "Validating values and finalizing results" },
+};
+
+function realGroupState(state: StageGroupState | undefined): StepState {
+  if (state === "running") return "active";
+  if (state === "done") return "done";
+  return "pending";
 }
 
-// `subtitle` is the always-visible, plain-language one-liner shown under
-// every stage in the timeline (so a non-technical reader understands what
-// each step means without recognizing jargon like "PP-StructureV3").
-// `banner` is the punchier "what's happening right now" phrasing shown in
-// the prominent stage-banner above the document panel while that stage is
-// active — same idea, more headline-y tone.
-function buildStages(hasDigital: boolean, hasScanned: boolean): Stage[] {
-  return [
-    {
-      label: "Uploading document",
-      subtitle: "Saving your file so it can be read",
-      banner: "Saving your document",
-      applicable: true,
-    },
-    {
-      label: "Detecting PDF type",
-      subtitle: "Checking if each page is text or a scan",
-      banner: "Checking what kind of page this is",
-      applicable: true,
-    },
-    {
-      label: "Extracting digital text — PyMuPDF",
-      subtitle: "Pulling text directly from the PDF",
-      banner: "Now reading: text directly from the PDF",
-      applicable: hasDigital,
-    },
-    {
-      label: "Detecting scanned layout — PP-StructureV3",
-      subtitle: "Finding tables, text blocks, and handwriting on the page",
-      banner: "Now scanning: page layout for tables and text",
-      applicable: hasScanned,
-    },
-    {
-      label: "Detecting BOQ table",
-      subtitle: "Locating the pricing table on the page",
-      banner: "Now scanning: looking for the pricing table",
-      applicable: hasScanned,
-    },
-    {
-      label: "Extracting printed values — PaddleOCR",
-      subtitle: "Reading printed numbers and text from the table",
-      banner: "Now reading: printed table values (PaddleOCR)",
-      applicable: hasScanned,
-    },
-    {
-      label: "Reading handwriting — Tesseract",
-      subtitle: "Reading handwritten notes and corrections",
-      banner: "Now reading: handwritten notes (Tesseract)",
-      applicable: hasScanned,
-    },
-    {
-      label: "Building BOQ structure",
-      subtitle: "Organizing everything into rows and columns",
-      banner: "Now organizing: building the item list",
-      applicable: true,
-    },
-    {
-      label: "Running business rules",
-      subtitle: "Checking the numbers add up correctly",
-      banner: "Now checking: does the math add up",
-      applicable: true,
-    },
-    {
-      label: "Resolving ambiguous values",
-      subtitle: "Double-checking anything unclear with AI",
-      banner: "Now double-checking unclear values with AI",
-      applicable: true,
-    },
-    {
-      label: "Finalizing results",
-      subtitle: "Putting together your final results",
-      banner: "Now finishing: preparing your results",
-      applicable: true,
-    },
-  ];
-}
-
-// The backend runs /process as one synchronous call with no granular
-// per-stage progress reporting. Known simplification (per spec): the first
-// two stages complete during /api/prepare (before this view is even shown),
-// every other applicable stage shows "active" together for the duration of
-// the in-flight /api/process call, then all flip to "done" at once when it
-// returns. This timeline is GLOBAL — it reflects the whole document's
-// pipeline status and never changes when the user pages through the
-// document panel below.
-function stageState(stage: Stage, index: number, phase: ProcessingPhase): "done" | "active" | "pending" | "skip" {
-  if (!stage.applicable) return "skip";
-  if (phase === "done") return "done";
-  if (phase === "processing") return index < 2 ? "done" : "active";
-  return index === 0 ? "active" : "pending";
-}
-
-type RegionKind = "table" | "handwriting" | "digital";
+type RegionKind = "table" | "handwriting" | "digital" | "llm";
 
 interface RegionBox {
   id: string;
@@ -120,6 +39,7 @@ const LEGEND: Record<RegionKind, { label: string; color: string }> = {
   table: { label: "Printed — PaddleOCR", color: "var(--blue-500)" },
   handwriting: { label: "Handwritten — Tesseract", color: "var(--core-amber)" },
   digital: { label: "Extracted — PyMuPDF", color: "var(--pymupdf)" },
+  llm: { label: "AI-identified from text", color: "var(--blue-900)" },
 };
 
 function truncate(text: string, max = 24): string {
@@ -150,8 +70,16 @@ function normalizeRegions(entry: PageRegionsEntry): RegionBox[] {
   return entry.regions.map((region, i) => {
     const bbox = region.bbox as [number, number, number, number];
     const category = String(region.category ?? "");
-    const kind: RegionKind = category === "handwriting" ? "handwriting" : "table";
-    const label = kind === "handwriting" ? "Handwriting" : region.type === "table" ? "BOQ Table" : "Printed text";
+    const kind: RegionKind =
+      category === "handwriting" ? "handwriting" : category === "llm_line_item" ? "llm" : "table";
+    const label =
+      kind === "handwriting"
+        ? "Handwriting"
+        : kind === "llm"
+          ? `AI: ${truncate(String(region.content ?? "Line item"), 18)}`
+          : region.type === "table"
+            ? "BOQ Table"
+            : "Printed text";
     return {
       id: `s-${i}`,
       kind,
@@ -164,12 +92,17 @@ function normalizeRegions(entry: PageRegionsEntry): RegionBox[] {
   });
 }
 
-// A page is worth flagging as "has content" once we know it either has
-// detected table/handwriting regions (scanned) or simply hasn't been
-// determined yet (still processing — shown as a pending amber dot rather
-// than silently looking identical to "nothing here").
-function pillState(page: PageRoute, entry: PageRegionsEntry | undefined): "has-content" | "pending" | "none" {
+// A page's real state comes from progress.pages[i].status when we have it
+// (queued/active/done, from python/progress.py) — falls back to the
+// region-presence heuristic only before any progress has been polled yet.
+function pillState(
+  page: PageRoute,
+  entry: PageRegionsEntry | undefined,
+  pageProgressStatus: "queued" | "active" | "done" | undefined,
+): "has-content" | "pending" | "none" {
   if (page.type === "digital") return "none";
+  if (pageProgressStatus === "done") return entry && entry.regions.length > 0 ? "has-content" : "none";
+  if (pageProgressStatus === "active" || pageProgressStatus === "queued") return "pending";
   if (!entry) return "pending";
   return entry.regions.length > 0 ? "has-content" : "none";
 }
@@ -181,12 +114,11 @@ export default function ProcessingStatus({
   currentPage,
   onPageChange,
   regionsByPage,
-  hasDigital,
-  hasScanned,
   digitalCount,
   scannedCount,
   phase,
   startedAt,
+  progress,
 }: {
   documentId: string;
   fileName: string;
@@ -194,21 +126,39 @@ export default function ProcessingStatus({
   currentPage: number;
   onPageChange: (page: number) => void;
   regionsByPage: Map<number, PageRegionsEntry>;
-  hasDigital: boolean;
-  hasScanned: boolean;
   digitalCount: number;
   scannedCount: number;
   phase: ProcessingPhase;
   startedAt: number | null;
+  // Real, polled per-page progress (python/progress.py via GET /status) —
+  // null before the first poll response arrives. Every stage/page state
+  // shown below comes from this, never simulated with a timer.
+  progress: ProcessingProgress | null;
 }) {
-  const stages = buildStages(hasDigital, hasScanned);
-  const applicableStages = stages.filter((s) => s.applicable);
-  const activeIndex = stages.findIndex((s, i) => stageState(s, i, phase) === "active");
-  const activeStage = activeIndex >= 0 ? stages[activeIndex] : null;
+  const pagesTotal = progress?.pages_total ?? pages.length;
+  const livePage = progress?.live_page ?? null;
+  const currentPageProgress = progress?.pages.find((p) => p.page === currentPage) ?? null;
 
-  const doneCount = applicableStages.filter((s, i) => stageState(s, stages.indexOf(s), phase) === "done").length;
-  const stepNumber = phase === "done" ? applicableStages.length : doneCount + (activeStage ? 1 : 0);
-  const progressPct = applicableStages.length > 0 ? (stepNumber / applicableStages.length) * 100 : 0;
+  const stageGroups = GROUP_ORDER.map((groupKey): StageGroup => {
+    const info = GROUP_INFO[groupKey];
+    const state: StepState =
+      phase === "done" ? "done" : realGroupState(currentPageProgress?.stages[groupKey]);
+    const steps: Step[] = [{ label: info.name, subtitle: info.subtitle, state }];
+    return { name: info.name, steps };
+  }) as [StageGroup, StageGroup, StageGroup, StageGroup];
+
+  const pagesDone = progress?.pages.filter((p) => p.status === "done").length ?? 0;
+  const progressPct = pagesTotal > 0 ? (phase === "done" ? 100 : (pagesDone / pagesTotal) * 100) : 0;
+
+  const activeGroupKey = GROUP_ORDER.find((g) => currentPageProgress?.stages[g] === "running");
+  const bannerText =
+    phase === "done"
+      ? "All done — results ready"
+      : phase === "preparing"
+        ? "Saving your document"
+        : livePage
+          ? `Processing page ${livePage} of ${pagesTotal}${activeGroupKey ? ` — ${GROUP_INFO[activeGroupKey].subtitle.toLowerCase()}` : ""}`
+          : "Getting started…";
 
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   useEffect(() => {
@@ -226,12 +176,7 @@ export default function ProcessingStatus({
   const legendKinds = Array.from(new Set(boxes.map((b) => b.kind)));
   const pageImageUrl = `/api/result/${documentId}/page/${currentPage}`;
 
-  // Nothing to show ON the document yet for this page (still mid-stage,
-  // hasn't reached region detection, or this specific page's regions
-  // aren't in yet) — keep the panel visibly "alive" instead of static.
   const showAliveAnimation = phase === "processing" && boxes.length === 0;
-
-  const bannerText = phase === "done" ? "All done — results ready" : activeStage?.banner ?? "Getting started…";
 
   return (
     <div className="proc-inner">
@@ -246,7 +191,7 @@ export default function ProcessingStatus({
       <div className="overall-progress">
         <div className="bar-label">
           <span>
-            Step {Math.min(stepNumber, applicableStages.length)} of {applicableStages.length}
+            {phase === "done" ? `${pagesTotal} of ${pagesTotal} pages` : `${pagesDone} of ${pagesTotal} pages done`}
           </span>
           <span>{phase === "done" ? "Complete" : `${Math.round(progressPct)}%`}</span>
         </div>
@@ -320,19 +265,22 @@ export default function ProcessingStatus({
           {pages.length > 1 && (
             <div className="page-pills">
               {pages.map((page) => {
-                const state = pillState(page, regionsByPage.get(page.page));
+                const pageProgressStatus = progress?.pages.find((p) => p.page === page.page)?.status;
+                const state = pillState(page, regionsByPage.get(page.page), pageProgressStatus);
                 return (
                   <button
                     key={page.page}
                     type="button"
-                    className={`page-pill${page.page === currentPage ? " active" : ""}${state !== "none" ? ` ${state}` : ""}`}
+                    className={`page-pill${page.page === currentPage ? " active" : ""}${state !== "none" ? ` ${state}` : ""}${page.page === livePage ? " live" : ""}`}
                     onClick={() => onPageChange(page.page)}
                     title={
-                      state === "has-content"
-                        ? "Detected table/handwriting region"
-                        : state === "pending"
-                          ? "Still processing"
-                          : "Digital text only"
+                      page.page === livePage
+                        ? "Currently being processed"
+                        : state === "has-content"
+                          ? "Detected table/handwriting region"
+                          : state === "pending"
+                            ? "Still processing"
+                            : "Digital text only"
                     }
                   >
                     <span className="pdot" />
@@ -357,20 +305,7 @@ export default function ProcessingStatus({
         </div>
 
         <div>
-          <div className="step-timeline">
-            {stages.map((stage, i) => (
-              <div className="tl-row" key={stage.label} data-state={stageState(stage, i, phase)}>
-                <div className="tl-indicator">
-                  <div className="tl-dot" />
-                  <div className="tl-line" />
-                </div>
-                <div className="tl-content">
-                  <div className="tl-title">{stage.label}</div>
-                  <div className="tl-subtitle">{stage.subtitle}</div>
-                </div>
-              </div>
-            ))}
-          </div>
+          <StageCards groups={stageGroups} elapsedSeconds={elapsedSeconds} />
         </div>
       </div>
     </div>

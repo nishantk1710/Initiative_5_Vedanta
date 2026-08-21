@@ -1,0 +1,27 @@
+# PaddleOCR-VL-0.9B microservice — deliberately ISOLATED from python/requirements.txt.
+#
+# See main.py's module docstring for why this needs its own venv: PaddleOCR-VL's
+# safetensors weight loader only handles bfloat16 natively on paddlepaddle>=3.2.0;
+# the main extraction service is pinned to paddlepaddle==3.1.0 for an unrelated
+# reason (PP-StructureV3's layout detector breaks on paddlepaddle>=3.2 on Windows
+# CPU). Never install this file into the main .venv, and never install
+# python/requirements.txt into this service's venv.
+#
+# Setup — paddlepaddle's CPU wheel for this version isn't on PyPI, so it
+# needs the official index explicitly (installing the rest of this file
+# first is fine; pip will just find paddlepaddle already satisfied):
+#   py -3.13 -m venv .venv_vl
+#   .venv_vl\Scripts\python.exe -m pip install paddlepaddle==3.2.1 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+#   .venv_vl\Scripts\python.exe -m pip install -r python_vl_service/requirements.txt
+#
+# Run (from this directory, so `main` resolves to python_vl_service/main.py):
+#   ..\.venv_vl\Scripts\python.exe -m uvicorn main:app --port 8010
+
+setuptools
+
+paddlepaddle==3.2.1
+paddleocr[doc-parser]
+
+fastapi
+uvicorn
+pydantic

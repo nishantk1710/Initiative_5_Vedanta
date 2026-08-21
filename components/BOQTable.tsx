@@ -1,27 +1,48 @@
 "use client";
 
 import type { ExtractedValue, LineItem, ProcessResult } from "@/lib/types";
+import type { Highlight } from "@/components/PageHighlightViewer";
 
-const ALL_FIELD_KEYS = ["itemCode", "description", "quantity", "unit", "rate", "amount", "taxRate", "taxAmount"] as const;
-type FieldKey = (typeof ALL_FIELD_KEYS)[number];
+export const ALL_FIELD_KEYS = ["itemCode", "description", "quantity", "unit", "rate", "amount", "taxRate", "taxAmount"] as const;
+export type FieldKey = (typeof ALL_FIELD_KEYS)[number];
 
-const ENGINE_LABEL: Record<ExtractedValue["source"], string> = {
+export const ENGINE_LABEL: Record<ExtractedValue["source"], string> = {
   pymupdf: "PyMuPDF",
   paddleocr: "PaddleOCR",
   tesseract: "Tesseract",
+  llm: "AI-identified",
 };
 
 // Only the fields this row actually has — LineItem's optional columns
 // (itemCode/unit/taxRate/taxAmount) may be entirely absent.
-function rowFieldKeys(row: LineItem): FieldKey[] {
+export function rowFieldKeys(row: LineItem): FieldKey[] {
   return ALL_FIELD_KEYS.filter((k) => row[k] !== undefined);
+}
+
+// Union bbox across every field this row actually has real bbox provenance
+// for — mirrors pipeline.py's _row_display_regions, computed client-side so
+// hovering a row can highlight its true source region on the page image.
+function rowHighlight(row: LineItem): Highlight | null {
+  const fields = rowFieldKeys(row)
+    .map((k) => row[k])
+    .filter((f): f is ExtractedValue<number | string> => !!f && f.bbox.some((v) => v !== 0));
+  if (fields.length === 0) return null;
+  return {
+    page: fields[0].page,
+    bbox: [
+      Math.min(...fields.map((f) => f.bbox[0])),
+      Math.min(...fields.map((f) => f.bbox[1])),
+      Math.max(...fields.map((f) => f.bbox[2])),
+      Math.max(...fields.map((f) => f.bbox[3])),
+    ],
+  };
 }
 
 // A field with no value was never extracted at all (build_line_items found
 // nothing for that column in this row) — it's a "not applicable" placeholder,
 // not a low-confidence read, and must never drag the row's displayed
 // confidence toward 0%. Only fields that actually have a value contribute.
-function rowConfidence(row: LineItem): number {
+export function rowConfidence(row: LineItem): number {
   const scored = rowFieldKeys(row)
     .map((k) => row[k]!)
     .filter((f) => String(f.value).trim() !== "");
@@ -29,20 +50,11 @@ function rowConfidence(row: LineItem): number {
   return Math.min(...scored.map((f) => f.confidence));
 }
 
-function firstNonValidField(row: LineItem): FieldKey {
-  const keys = rowFieldKeys(row);
-  const withValue = keys.find(
-    (k) => row[k]!.status && row[k]!.status !== "valid" && String(row[k]!.value).trim() !== "",
-  );
-  if (withValue) return withValue;
-  return keys.find((k) => row[k]!.status && row[k]!.status !== "valid") ?? "description";
-}
-
 // Which columns to show at all — a document with no invoice-only fields
 // never gets an itemCode column, one with no `unit` on any row never gets
 // a Unit column, etc. Order: itemCode, description, quantity, unit, rate,
 // amount (tax fields feed validation but aren't given dedicated columns).
-function presentColumns(rows: LineItem[]): FieldKey[] {
+export function presentColumns(rows: LineItem[]): FieldKey[] {
   const columns: FieldKey[] = [];
   if (rows.some((r) => r.itemCode)) columns.push("itemCode");
   columns.push("description", "quantity");
@@ -51,7 +63,7 @@ function presentColumns(rows: LineItem[]): FieldKey[] {
   return columns;
 }
 
-const COLUMN_LABEL: Record<FieldKey, string> = {
+export const COLUMN_LABEL: Record<FieldKey, string> = {
   itemCode: "Code",
   description: "Description",
   quantity: "Qty",
@@ -62,19 +74,97 @@ const COLUMN_LABEL: Record<FieldKey, string> = {
   taxAmount: "Tax",
 };
 
-const NUMERIC_COLUMNS: FieldKey[] = ["quantity", "rate", "amount", "taxRate", "taxAmount"];
+export const NUMERIC_COLUMNS: FieldKey[] = ["quantity", "rate", "amount", "taxRate", "taxAmount"];
+
+export function titleCase(value: string): string {
+  return value
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((word) => word[0].toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+// A table's display title reflects what it was actually tagged as — never
+// hardcoded to "Invoice Items" for a table that might be a bank statement's
+// transactions or an attendance sheet.
+export function tableTitle(semanticRole: string): string {
+  if (semanticRole === "unknown") return "Detected Table";
+  return titleCase(semanticRole);
+}
 
 export default function BOQTable({
   result,
-  onViewSource,
+  onHover,
 }: {
   result: ProcessResult;
-  onViewSource: (row: LineItem, field: FieldKey) => void;
+  onHover?: (highlight: Highlight | null) => void;
 }) {
-  const { summary, lineItems } = result;
+  const { summary, lineItems, tables, fields } = result;
   const shownRows = lineItems.slice(0, 20);
   const moreCount = lineItems.length - shownRows.length;
   const columns = presentColumns(lineItems);
+  const hasLineItems = lineItems.length > 0;
+  const genericFieldEntries = Object.entries(fields ?? {});
+
+  if (!hasLineItems && ((tables && tables.length > 0) || genericFieldEntries.length > 0)) {
+    return (
+      <>
+        {genericFieldEntries.length > 0 && (
+          <div className="generic-fields">
+            <h3>Detected Fields</h3>
+            <dl>
+              {genericFieldEntries.map(([key, field]) => (
+                <div key={key} className="field-row">
+                  <dt>{titleCase(key)}</dt>
+                  <dd>{field.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        )}
+        {(tables ?? []).map((table) => (
+          <div key={table.table_id} className="generic-table">
+            <h3>
+              {tableTitle(table.semantic_role)}
+              {table.semantic_role !== "unknown" && (
+                <span className="sub"> · {Math.round(table.semantic_confidence * 100)}% confidence</span>
+              )}
+            </h3>
+            {/* Real continuation pages from python/continuation.py's
+                geometry-based linking — never an assumption about which
+                pages might be related. */}
+            {table.pages && table.pages.length > 1 && (
+              <p className="continuation-note">
+                This table spans pages {table.pages.join(", ")} — rows from all of them are merged here.
+              </p>
+            )}
+            <table className="boq">
+              <thead>
+                <tr>
+                  {table.headers.map((h, i) => (
+                    <th key={i}>{h || `Column ${i + 1}`}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {table.rows.map((row, i) => (
+                  <tr
+                    key={i}
+                    onMouseEnter={() => onHover?.({ page: table.page, bbox: table.bbox })}
+                    onMouseLeave={() => onHover?.(null)}
+                  >
+                    {row.map((cell, j) => (
+                      <td key={j}>{cell}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </>
+    );
+  }
 
   return (
     <>
@@ -128,7 +218,6 @@ export default function BOQTable({
               </th>
             ))}
             <th className="num">Confidence</th>
-            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -137,8 +226,14 @@ export default function BOQTable({
             const confClass = conf >= 0.85 ? "ok" : "warn";
             const engine = row.description.source;
             const needsReview = row.status !== "valid";
+            const highlight = rowHighlight(row);
             return (
-              <tr key={i} className={needsReview ? `status-${row.status}` : undefined}>
+              <tr
+                key={i}
+                className={needsReview ? `status-${row.status}` : undefined}
+                onMouseEnter={() => highlight && onHover?.(highlight)}
+                onMouseLeave={() => onHover?.(null)}
+              >
                 {columns.map((col) => {
                   const field = row[col];
                   if (col === "description") {
@@ -163,23 +258,6 @@ export default function BOQTable({
                     <span className="cdot" />
                     {Math.round(conf * 100)}%
                   </span>
-                </td>
-                <td className="action-cell">
-                  {needsReview ? (
-                    <button
-                      type="button"
-                      className="view-src"
-                      onClick={() => onViewSource(row, firstNonValidField(row))}
-                    >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
-                        <circle cx="12" cy="12" r="3" />
-                      </svg>
-                      View source
-                    </button>
-                  ) : (
-                    <span className="ok-mark">✓</span>
-                  )}
                 </td>
               </tr>
             );

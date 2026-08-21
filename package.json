@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test:py": ".venv/Scripts/python.exe -m pytest",
+    "test:py:slow": ".venv/Scripts/python.exe -m pytest -m slow",
+    "test:py:all": ".venv/Scripts/python.exe -m pytest -m \"slow or not slow\""
   },
   "dependencies": {
     "next": "16.3.1",
